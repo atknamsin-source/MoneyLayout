@@ -36,14 +36,26 @@ export default function Dashboard() {
   const [showToast, setShowToast] = useState(false);
   const [isDirty, setIsDirty] = useState(false);
   const [autoSaveStatus, setAutoSaveStatus] = useState<'idle' | 'saving' | 'saved'>('idle');
+  const [isNewProfile, setIsNewProfile] = useState(false);
+  const [dbError, setDbError] = useState<string | null>(!supabase ? 'Supabase 환경변수가 누락되었습니다 (.env 확인)' : null);
+
+  // --- Security states ---
+  const [isAuthorized, setIsAuthorized] = useState<boolean>(false);
+  const [pinCode, setPinCode] = useState<string>('');
+  const [showPinModal, setShowPinModal] = useState<boolean>(false);
+  const [inputPin, setInputPin] = useState<string>('');
+  const [pinError, setPinError] = useState<string>('');
+  const [originalPin, setOriginalPin] = useState<string | null>(null);
 
   useEffect(() => {
     if (profileId && supabase) {
-      fetchData();
+      if (!showPinModal) {
+        fetchData();
+      }
     } else {
       setIsFetching(false);
     }
-  }, [profileId, targetMonth]);
+  }, [profileId, targetMonth, isAuthorized]);
 
   const fetchData = async () => {
     if (!supabase || !profileId) return;
@@ -51,15 +63,35 @@ export default function Dashboard() {
     
     try {
       // 1. Get Profile
-      const { data: profileData } = await supabase
+      const { data: profileData, error: profileError } = await supabase
         .from('baekel_profiles')
         .select('*')
         .eq('id', profileId)
-        .single();
-      
+        .maybeSingle();
+
       if (profileData) {
+        setIsNewProfile(false);
         setNickname(profileData.nickname || '나의 재정상태');
         setOwnerName(profileData.owner_name || '');
+        setPinCode(profileData.pin_code || '');
+        setOriginalPin(profileData.pin_code || null);
+        
+        // Check PIN auth
+        if (profileData.pin_code && !isAuthorized) {
+          setShowPinModal(true);
+          setIsFetching(false);
+          return;
+        } else {
+          setIsAuthorized(true);
+        }
+      } else {
+        setIsNewProfile(true);
+        setIsAuthorized(true);
+      }
+
+      if (profileError) {
+        console.error("Profile fetch error:", profileError);
+        setDbError(`DB 에러: ${profileError.message}`);
       }
 
       // 2. Get Monthly Asset
@@ -204,7 +236,7 @@ export default function Dashboard() {
   };
 
   useEffect(() => {
-    if (!isDirty || isFetching || !targetMonth) return;
+    if (!isDirty || isFetching || !targetMonth || !isAuthorized) return;
 
     const timer = setTimeout(() => {
       handleSave(true);
@@ -240,7 +272,8 @@ export default function Dashboard() {
         .upsert({ 
            id: profileId, 
            nickname,
-           owner_name: ownerName
+           owner_name: ownerName,
+           pin_code: pinCode || null
         });
 
       // 1-1. 특정 월 자산 저장
@@ -438,6 +471,45 @@ export default function Dashboard() {
     MINUS: items.filter(it => it.type === 'MINUS')
   };
 
+  const handlePinSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (inputPin === originalPin) {
+      setIsAuthorized(true);
+      setShowPinModal(false);
+      setPinError('');
+    } else {
+      setPinError('비밀번호가 일치하지 않습니다.');
+    }
+  };
+
+  if (showPinModal) {
+    return (
+      <div className="flex h-screen items-center justify-center bg-emerald-50/60 p-4">
+        <form onSubmit={handlePinSubmit} className="bg-white p-8 rounded-3xl shadow-xl border border-emerald-100 max-w-sm w-full text-center">
+          <div className="w-16 h-16 bg-emerald-100 rounded-2xl flex items-center justify-center text-3xl mx-auto mb-4 shadow-inner">🔒</div>
+          <h2 className="text-xl font-bold text-slate-800 mb-2">프라이빗 자산 플래너</h2>
+          <p className="text-sm text-slate-500 mb-6">현재 프로필은 비밀번호로 보호되어 있습니다.<br/>확인을 위해 비밀번호를 입력해주세요.</p>
+          <input
+            type="password"
+            value={inputPin}
+            onChange={(e) => setInputPin(e.target.value)}
+            className="w-full text-center tracking-widest text-lg font-bold px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:bg-white transition-all mb-2"
+            placeholder="비밀번호 4자리"
+            maxLength={4}
+            autoFocus
+          />
+          {pinError && <p className="text-rose-500 text-sm font-medium mb-4">{pinError}</p>}
+          <button 
+            type="submit" 
+            className="w-full mt-4 bg-emerald-600 hover:bg-emerald-700 text-white font-bold py-3 rounded-xl transition-colors shadow-md shadow-emerald-500/30"
+          >
+            확인
+          </button>
+        </form>
+      </div>
+    );
+  }
+
   if (isFetching) {
     return (
       <div className="flex h-screen items-center justify-center bg-gray-50">
@@ -456,6 +528,18 @@ export default function Dashboard() {
         <span className="text-lg">💸</span>
         저장되었습니다!
       </div>
+
+      {dbError && (
+        <div className="max-w-6xl w-full mb-4 bg-rose-100 border border-rose-200 text-rose-800 px-4 py-3 rounded-xl shadow-sm text-sm font-medium flex items-center gap-2">
+          <span>⚠️</span> {dbError}
+        </div>
+      )}
+
+      {isNewProfile && !dbError && (
+        <div className="max-w-6xl w-full mb-4 bg-blue-50 border border-blue-200 text-blue-800 px-4 py-3 rounded-xl shadow-sm text-sm font-medium flex items-center gap-2">
+          <span>👋</span> 새로운 프로필입니다! 지금 저장하기를 누르면 새로운 프로필이 생성됩니다.
+        </div>
+      )}
       
       <div className="max-w-6xl w-full bg-white rounded-[2rem] shadow-xl shadow-emerald-100/50 p-6 md:p-10 border border-emerald-100 flex-1 flex flex-col my-2">
       {/* Header */}
@@ -469,12 +553,26 @@ export default function Dashboard() {
               className="text-xl font-bold tracking-tight bg-transparent border border-transparent hover:border-slate-200 focus:border-indigo-300 focus:ring-2 focus:ring-indigo-100 rounded px-2 -ml-2 transition-all outline-none"
               placeholder="프로필 이름"
             />
-            <input 
-              value={ownerName}
-              onChange={(e) => { setOwnerName(e.target.value); setIsDirty(true); }}
-              className="text-sm font-medium text-slate-500 bg-transparent border border-transparent hover:border-slate-200 focus:border-indigo-300 focus:ring-2 focus:ring-indigo-100 rounded px-2 -ml-2 transition-all outline-none -mt-1"
-              placeholder="사용자 이름 (예: 홍길동)"
-            />
+            <div className="flex items-center gap-2 -mt-1">
+              <input 
+                value={ownerName}
+                onChange={(e) => { setOwnerName(e.target.value); setIsDirty(true); }}
+                className="text-sm font-medium text-slate-500 bg-transparent border border-transparent hover:border-slate-200 focus:border-indigo-300 focus:ring-2 focus:ring-indigo-100 rounded px-2 -ml-2 transition-all outline-none"
+                placeholder="사용자 이름"
+              />
+              <div className="flex items-center bg-slate-100 rounded px-2 border border-transparent focus-within:border-indigo-300 focus-within:bg-white transition-all">
+                <span className="text-xs text-slate-400 mr-1">🔒</span>
+                <input
+                  type="password"
+                  value={pinCode}
+                  onChange={(e) => { setPinCode(e.target.value); setIsDirty(true); }}
+                  className="w-16 bg-transparent text-sm font-medium text-slate-500 outline-none"
+                  placeholder="PIN"
+                  maxLength={4}
+                  title="4자리 PIN 번호를 설정하여 타인의 접근을 막으세요"
+                />
+              </div>
+            </div>
           </div>
           <div className="flex items-center bg-white border border-slate-200 rounded-lg overflow-hidden shadow-sm ml-auto md:ml-2">
             <button 
