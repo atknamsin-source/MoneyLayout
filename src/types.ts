@@ -1,9 +1,10 @@
-export type ItemType = 'INCOME' | 'EXPENSE' | 'SAVING' | 'DEBT' | 'MINUS';
+export type ItemType = 'INCOME' | 'EXPENSE' | 'SAVING' | 'DEBT' | 'MINUS' | 'POINT';
 
 export interface Profile {
   id: string; // text (URL profile id)
   nickname: string;
   owner_name?: string;
+  pin_code?: string;
   created_at?: string;
 }
 
@@ -20,4 +21,3 @@ export interface FinancialItem {
   is_pinned?: boolean; // 다음 달로 항목 틀 고정 여부
   created_at?: string;
 }
-
