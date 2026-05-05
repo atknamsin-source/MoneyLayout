@@ -22,21 +22,18 @@ import {
 import { cn } from '../lib/utils';
 
 export default function Dashboard() {
-  const { profileId } = useParams();
-  
+  const { profileId } = useParams<{ profileId: string }>();
   const [nickname, setNickname] = useState('나의 재정상태');
   const [ownerName, setOwnerName] = useState('');
-  const [targetMonth, setTargetMonth] = useState(() => {
-    const d = new Date();
-    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
-  });
-  
+  const [targetMonth, setTargetMonth] = useState(new Date().toISOString().slice(0, 7)); // YYYY-MM
+  const [baseAsset, setBaseAsset] = useState<number>(0);
+  const [carriedOverAsset, setCarriedOverAsset] = useState<number>(0);
+  const [isEarliestMonth, setIsEarliestMonth] = useState<boolean>(true);
   const [items, setItems] = useState<FinancialItem[]>([]);
-  const [baseAsset, setBaseAsset] = useState<number | string>(0);
-  const [isEarliestMonth, setIsEarliestMonth] = useState(false);
-  const [carriedOverAsset, setCarriedOverAsset] = useState(0); // 전달에서 넘어온 자산
-  const [isFetching, setIsFetching] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
+  const [isFetching, setIsFetching] = useState(true);
+  const [copied, setCopied] = useState(false);
+  const [showToast, setShowToast] = useState(false);
   const [isDirty, setIsDirty] = useState(false);
   const [autoSaveStatus, setAutoSaveStatus] = useState<'idle' | 'saving' | 'saved'>('idle');
   const [isNewProfile, setIsNewProfile] = useState(false);
@@ -62,11 +59,10 @@ export default function Dashboard() {
 
   const fetchData = async () => {
     if (!supabase || !profileId) return;
-
+    setIsFetching(true);
+    
     try {
-      setIsFetching(true);
-      
-      // 1. Fetch Profile
+      // 1. Get Profile
       const { data: profileData, error: profileError } = await supabase
         .from('baekel_profiles')
         .select('*')
@@ -94,10 +90,11 @@ export default function Dashboard() {
       }
 
       if (profileError) {
-        console.error("Profile fetch error: ", profileError);
+        console.error("Profile fetch error:", profileError);
+        setDbError(`DB 에러: ${profileError.message}`);
       }
 
-      // 2. Fetch or Init Monthly Asset
+      // 2. Get Monthly Asset
       const { data: assetData, error: assetError } = await supabase
         .from('baekel_monthly_assets')
         .select('*')
@@ -105,17 +102,21 @@ export default function Dashboard() {
         .eq('target_month', targetMonth)
         .maybeSingle();
 
+      if (assetError) {
+        if (assetError.code === '42P01') {
+           console.error("Missing table baekel_monthly_assets");
+        } else if (assetError.code === '42703') {
+           console.error("Missing columns");
+        }
+      }
+
       if (assetData) {
-        setBaseAsset(assetData.base_asset);
+        setBaseAsset(assetData.base_asset || 0);
       } else {
         setBaseAsset(0);
       }
 
-      if (assetError) {
-        console.error("Asset fetch error: ", assetError);
-      }
-
-      // 3. Fetch Items
+      // 3. Get Items
       const { data: itemsData, error: itemsError } = await supabase
         .from('baekel_financial_items')
         .select('*')
@@ -198,23 +199,21 @@ export default function Dashboard() {
           .from('baekel_financial_items')
           .select('type, monthly_amount')
           .eq('profile_id', profileId)
-          .lt('target_month', targetMonth);
+          .lt('target_month', targetMonth)
+          .gte('target_month', earliestMonth);
 
         if (pastItems) {
-          const pastIncome = pastItems.filter(i => i.type === 'INCOME').reduce((s, i) => s + Number(i.monthly_amount || 0), 0);
-          const pastExpense = pastItems.filter(i => i.type === 'EXPENSE').reduce((s, i) => s + Number(i.monthly_amount || 0), 0);
-          const pastSaving = pastItems.filter(i => i.type === 'SAVING').reduce((s, i) => s + Number(i.monthly_amount || 0), 0);
-          const pastDebtRepayment = pastItems.filter(i => i.type === 'DEBT').reduce((s, i) => s + Number(i.monthly_amount || 0), 0);
-          
-          pastTotal += (pastIncome - pastExpense - pastSaving - pastDebtRepayment);
+          const pIn = pastItems.filter(i => i.type === 'INCOME').reduce((s, i) => s + (i.monthly_amount || 0), 0);
+          const pEx = pastItems.filter(i => i.type === 'EXPENSE').reduce((s, i) => s + (i.monthly_amount || 0), 0);
+          const pSav = pastItems.filter(i => i.type === 'SAVING').reduce((s, i) => s + (i.monthly_amount || 0), 0);
+          const pDebt = pastItems.filter(i => i.type === 'DEBT').reduce((s, i) => s + (i.monthly_amount || 0), 0);
+          pastTotal += (pIn - pEx - pSav - pDebt);
         }
       }
+
       setCarriedOverAsset(pastTotal);
-      setIsDirty(false);
-      setDbError(null);
-    } catch (err: any) {
+    } catch (err) {
       console.error(err);
-      setDbError(err.message || '데이터를 불러오는 중 오류가 발생했습니다.');
     } finally {
       setIsFetching(false);
     }
@@ -278,78 +277,128 @@ export default function Dashboard() {
         });
 
       // 1-1. 특정 월 자산 저장
-      await supabase
+      const { error: assetError } = await supabase
         .from('baekel_monthly_assets')
-        .upsert(
-          {
-            profile_id: profileId,
-            target_month: targetMonth,
-            base_asset: Number(baseAsset) || 0,
-          },
-          { onConflict: 'profile_id,target_month' }
-        );
+        .upsert({
+           profile_id: profileId,
+           target_month: targetMonth,
+           base_asset: Number(baseAsset) || 0
+        }, { onConflict: 'profile_id,target_month' });
 
-      // 2. 현재 화면의 아이템 중 profile_id 매핑 누락된 것들 채우기
-      const mappedItems = items.map(item => ({
-        ...item,
-        profile_id: profileId,
-        target_month: targetMonth,
-      }));
+      if (assetError) {
+         console.error("Asset save error: ", assetError);
+         if (assetError.code === '42P01') {
+            alert('데이터베이스 테이블이 없습니다. supabase_schema.sql을 실행해주세요.');
+            setIsSaving(false);
+            return;
+         }
+      }
 
-      // 3. 기존 현재 월 데이터 가져오기 (비교 및 삭제용)
+      // 2. cascade delete deleted items in future months
       const { data: existingItems } = await supabase
+         .from('baekel_financial_items')
+         .select('id, name')
+         .eq('profile_id', profileId)
+         .eq('target_month', targetMonth);
+
+      const deletedItemNames = existingItems
+         ?.filter(ex => !items.find(it => it.name === ex.name))
+         .map(ex => ex.name) || [];
+
+      if (deletedItemNames.length > 0) {
+         await supabase
+           .from('baekel_financial_items')
+           .delete()
+           .eq('profile_id', profileId)
+           .in('name', deletedItemNames)
+           .gt('target_month', targetMonth);
+      }
+
+      // 3. 항목 삭제 관리 프로세스: 현재 연결된 모든 항목을 지우고 다시 삽입
+      await supabase
         .from('baekel_financial_items')
-        .select('id')
+        .delete()
         .eq('profile_id', profileId)
         .eq('target_month', targetMonth);
 
-      const existingIds = existingItems?.map(e => e.id) || [];
-      const currentIds = mappedItems.map(m => m.id);
-      
-      const idsToDelete = existingIds.filter(id => !currentIds.includes(id));
-
-      if (idsToDelete.length > 0) {
-        await supabase
+      // 4. 사용자가 입력한 현재 항목들을 삽입 (항목이 1개 이상일 경우에만)
+      if (items.length > 0) {
+        const { error: itemsError } = await supabase
           .from('baekel_financial_items')
-          .delete()
-          .in('id', idsToDelete);
-      }
-
-      // Upsert current items
-      if (mappedItems.length > 0) {
-        const { error: upsertError } = await supabase
-          .from('baekel_financial_items')
-          .upsert(mappedItems, { onConflict: 'id' });
+          .insert(items.map(item => ({
+             id: item.id,
+             profile_id: profileId,
+             target_month: targetMonth,
+             target_day: item.target_day || null,
+             type: item.type,
+             name: item.name,
+             monthly_amount: Number(item.monthly_amount) || 0,
+             balance: Number(item.balance) || 0,
+             total_amount: Number(item.total_amount) || 0,
+             is_pinned: item.is_pinned || false
+          })));
           
-        if (upsertError) throw upsertError;
-      }
+        if (itemsError && itemsError.code === '42703') {
+           // Fallback: try inserting without the newly added columns (is_pinned, total_amount, target_day) if schema wasn't updated
+           console.warn("Retrying without new columns...");
+           const { error: fallbackError } = await supabase
+             .from('baekel_financial_items')
+             .insert(items.map(item => ({
+                id: item.id,
+                profile_id: profileId,
+                target_month: targetMonth,
+                type: item.type,
+                name: item.name,
+                monthly_amount: Number(item.monthly_amount) || 0,
+                balance: Number(item.balance) || 0
+             })));
 
-      if (isAutoSave) {
-        setAutoSaveStatus('saved');
-        setTimeout(() => setAutoSaveStatus('idle'), 2000);
-      }
-      setDbError(null);
-    } catch (err: any) {
-      console.error(err);
-      if (isAutoSave) {
-        setAutoSaveStatus('idle'); // revert to idle on error
-      }
-      if (!isAutoSave) {
-        alert('저장 실패: ' + (err.message || '알 수 없는 오류'));
+           if (fallbackError) {
+             alert("데이터 저장에 실패했습니다. (DB 오류)");
+             console.error(fallbackError);
+           } else {
+             alert("✅ 데이터가 임시 저장되었습니다.\n(주의: 고정 항목 기능 등을 사용하려면 DB 스키마 업데이트가 필요합니다.)");
+
+           }
+        } else if (itemsError && itemsError.message.includes('type_check')) {
+           console.error(itemsError);
+        } else if (itemsError) {
+           console.error(itemsError);
+           if (!isAutoSave) alert("저장 중 오류가 발생했습니다.");
+        } else {
+           // 정상 저장 성공
+           if (!isAutoSave) {
+             setShowToast(true);
+             setTimeout(() => setShowToast(false), 3000);
+           } else {
+             setAutoSaveStatus('saved');
+             setTimeout(() => setAutoSaveStatus('idle'), 2000);
+           }
+        }
       } else {
-        setDbError('자동 저장 실패: ' + (err.message || '알 수 없는 오류'));
+         if (!isAutoSave) {
+           setShowToast(true);
+           setTimeout(() => setShowToast(false), 3000);
+         } else {
+           setAutoSaveStatus('saved');
+           setTimeout(() => setAutoSaveStatus('idle'), 2000);
+         }
       }
+      
+    } catch (err) {
+      console.error('Error saving data:', err);
     } finally {
       if (!isAutoSave) setIsSaving(false);
     }
   };
 
-  const copyLink = () => {
-    navigator.clipboard.writeText(window.location.href);
-    alert('고유 링크가 복사되었습니다!');
+  const copyToClipboard = () => {
+    const url = window.location.href;
+    navigator.clipboard.writeText(url).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    });
   };
-
-  // --- CRUD Functions (Local state only, syncs on save/auto-save) ---
 
   const addItem = (type: ItemType) => {
     const newItem: FinancialItem = {
@@ -362,7 +411,6 @@ export default function Dashboard() {
       monthly_amount: 0,
       balance: 0,
       total_amount: 0,
-      is_pinned: false
     };
     setItems(prev => [...prev, newItem]);
     setIsDirty(true);
@@ -378,8 +426,7 @@ export default function Dashboard() {
     setIsDirty(true);
   };
 
-  // --- Calculations ---
-
+  // 핵심 계산 로직 (PRD 명세 반영)
   const calculations = useMemo(() => {
     let totalIncome = 0;
     let totalExpense = 0;
@@ -388,14 +435,16 @@ export default function Dashboard() {
     let totalMinusUsed = 0;
 
     items.forEach(item => {
-      if (item.type === 'INCOME') totalIncome += Number(item.monthly_amount) || 0;
-      if (item.type === 'EXPENSE') totalExpense += Number(item.monthly_amount) || 0;
-      if (item.type === 'SAVING') totalSaving += Number(item.monthly_amount) || 0;
-      if (item.type === 'DEBT') totalDebtMonthly += Number(item.monthly_amount) || 0;
+      // 수입, 지출, 저축, 부채 월별 금액 합산
+      const amount = Number(item.monthly_amount) || 0;
+      if (item.type === 'INCOME') totalIncome += amount;
+      if (item.type === 'EXPENSE') totalExpense += amount;
+      if (item.type === 'SAVING') totalSaving += amount;
+      if (item.type === 'DEBT') totalDebtMonthly += amount;
       if (item.type === 'MINUS') totalMinusUsed += Number(item.balance) || 0;
     });
 
-    // 현금 흐름 = 이번달 수입 - (이번달 지출 + 이번달 저축 + 이번달 대출 상환액)
+    // 가용 현금 흐름 = 수입 - 지출 - 저축 - 부채상환
     const availableCashFlow = totalIncome - totalExpense - totalSaving - totalDebtMonthly;
     
     // 현재 총 순자산 추산: (첫 달이면 시작자산, 아니면 이월자산) + 이번달 잉여 현금 흐름
@@ -465,38 +514,40 @@ export default function Dashboard() {
   if (isFetching) {
     return (
       <div className="flex h-screen items-center justify-center bg-gray-50">
-        <div className="flex flex-col items-center">
-          <div className="animate-spin text-slate-300 mb-4"><PiggyBank size={40} /></div>
-          <p className="text-slate-500 font-medium">데이터를 불러오는 중입니다...</p>
-        </div>
+        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
       </div>
     );
   }
 
   return (
-    <div className="min-h-screen bg-[#F5F5F7] font-sans selection:bg-indigo-100 selection:text-indigo-900 overflow-x-hidden">
-      {/* Network Error Toast */}
+    <div className="min-h-screen bg-emerald-50/60 text-slate-900 font-sans p-4 md:p-8 flex flex-col items-center relative">
+      {/* Toast Notification */}
+      <div className={cn(
+        "fixed bottom-10 left-1/2 -translate-x-1/2 bg-emerald-100 shadow-xl shadow-emerald-200/50 rounded-2xl px-6 py-3 font-bold text-sm text-emerald-900 z-50 flex items-center gap-2 transition-all duration-300 border border-emerald-200",
+        showToast ? "opacity-100 translate-y-0" : "opacity-0 translate-y-4 pointer-events-none"
+      )}>
+        <span className="text-lg">💸</span>
+        저장되었습니다!
+      </div>
+
       {dbError && (
-        <div className="fixed top-4 left-1/2 -translate-x-1/2 bg-rose-500 text-white px-4 py-2 rounded-full text-sm font-bold shadow-lg z-50 animate-bounce">
-          {dbError}
+        <div className="max-w-6xl w-full mb-4 bg-rose-100 border border-rose-200 text-rose-800 px-4 py-3 rounded-xl shadow-sm text-sm font-medium flex items-center gap-2">
+          <span>⚠️</span> {dbError}
         </div>
       )}
 
-      {/* Auto-save Toast */}
-      {autoSaveStatus === 'saved' && (
-        <div className="fixed bottom-4 right-4 bg-slate-800 text-white px-4 py-2 rounded-full text-xs font-bold shadow-lg z-50 flex items-center gap-2">
-          <div className="w-2 h-2 rounded-full bg-emerald-400"></div>
-          안전하게 자동 저장되었습니다
+      {isNewProfile && !dbError && (
+        <div className="max-w-6xl w-full mb-4 bg-blue-50 border border-blue-200 text-blue-800 px-4 py-3 rounded-xl shadow-sm text-sm font-medium flex items-center gap-2">
+          <span>👋</span> 새로운 프로필입니다! 지금 저장하기를 누르면 새로운 프로필이 생성됩니다.
         </div>
       )}
-
-      {/* Navigation & Toolbar */}
-      <nav className="sticky top-0 z-40 bg-white/80 backdrop-blur-md border-b border-slate-200 shadow-sm px-4 md:px-8 py-3.5 flex justify-between items-center transition-all">
-        <div className="flex items-center gap-3">
-          <div className="w-9 h-9 bg-gradient-to-br from-indigo-500 to-indigo-600 rounded-xl flex items-center justify-center shadow-inner shadow-indigo-300 text-white shadow-sm">
-            <PiggyBank size={20} className="drop-shadow-sm" />
-          </div>
-          <div className="flex flex-col max-w-[200px] md:max-w-xs">
+      
+      <div className="max-w-6xl w-full bg-white rounded-[2rem] shadow-xl shadow-emerald-100/50 p-6 md:p-10 border border-emerald-100 flex-1 flex flex-col my-2">
+      {/* Header */}
+      <header className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 mb-6">
+        <div className="flex flex-wrap items-center gap-3 w-full md:w-auto">
+          <div className="w-10 h-10 bg-emerald-100 rounded-xl flex items-center justify-center text-xl shadow-inner border border-emerald-200 shrink-0">💸</div>
+          <div className="flex flex-col">
             <input 
               value={nickname}
               onChange={(e) => { setNickname(e.target.value); setIsDirty(true); }}
@@ -548,105 +599,112 @@ export default function Dashboard() {
             </button>
           </div>
         </div>
-        <div className="flex gap-2.5 shrink-0 opacity-0 md:opacity-100">
-          <button 
-            onClick={copyLink} 
-            className="flex items-center gap-1.5 px-3 py-1.5 bg-white border border-slate-200 text-slate-600 text-sm font-bold rounded-lg hover:bg-slate-50 hover:border-slate-300 hover:text-slate-900 transition-all shadow-sm"
-          >
-            <Copy size={16} /> 링크
-          </button>
-          <button 
-            onClick={() => handleSave(false)} 
-            disabled={isSaving || !isDirty}
-            className={cn(
-              "flex items-center gap-1.5 px-4 py-1.5 text-sm font-bold rounded-lg transition-all shadow-sm",
-              isSaving 
-                ? "bg-indigo-400 text-indigo-50 cursor-not-allowed" 
-                : !isDirty 
-                  ? "bg-slate-100 text-slate-400 cursor-default shadow-none border border-slate-200" 
-                  : "bg-indigo-600 hover:bg-indigo-700 text-white shadow-indigo-600/20"
-            )}
-          >
-            {isSaving ? <span className="animate-spin"><PiggyBank size={16}/></span> : <Save size={16} />} 
-            {isSaving ? '저장중...' : !isDirty ? '저장됨' : '저장'}
-          </button>
-        </div>
-      </nav>
-
-      {/* Floating Save Button on Mobile */}
-      <div className="md:hidden fixed bottom-6 right-6 z-40 flex flex-col gap-2">
-         <button 
-            onClick={copyLink} 
-            className="w-12 h-12 flex items-center justify-center bg-white border border-slate-200 text-slate-600 rounded-full hover:bg-slate-50 transition-all shadow-md"
-          >
-            <Copy size={20} />
-          </button>
-         <button 
-            onClick={() => handleSave(false)} 
-            disabled={isSaving || !isDirty}
-            className={cn(
-              "w-12 h-12 flex items-center justify-center text-white rounded-full transition-all shadow-lg",
-              isSaving 
-                ? "bg-indigo-400 cursor-not-allowed" 
-                : !isDirty 
-                  ? "bg-slate-400 cursor-default shadow-none" 
-                  : "bg-indigo-600 hover:bg-indigo-700 shadow-indigo-600/30"
-            )}
-          >
-            {isSaving ? <span className="animate-spin"><PiggyBank size={20}/></span> : <Save size={20} />} 
-          </button>
-      </div>
-
-      <div className="max-w-6xl mx-auto px-4 md:px-8 py-8 md:py-12">
-      {/* Main Asset Header */}
-      <header className="mb-8 md:mb-10 bg-white rounded-3xl p-6 md:p-10 border border-slate-200 shadow-sm flex flex-col md:flex-row md:items-end justify-between gap-8 relative overflow-hidden group">
-        <div className="absolute -right-20 -top-20 w-64 h-64 bg-indigo-50 rounded-full blur-3xl opacity-50 group-hover:bg-indigo-100 transition-colors pointer-events-none"></div>
-        <div className="relative z-10 w-full md:w-auto">
-          <h2 className="text-sm font-bold tracking-widest text-slate-400 uppercase mb-3 flex items-center gap-2">
-            <Wallet size={16} /> 
-            나의 순자산 
-            {isEarliestMonth && <span className="bg-orange-100 text-orange-700 text-[10px] px-2 py-0.5 rounded-sm ml-1 select-none font-bold">초기 자산 설정가능</span>}
-          </h2>
-          <div className="flex items-baseline gap-2">
-            <span className="text-3xl md:text-5xl font-black text-slate-900 tracking-tight">₩</span>
-            {isEarliestMonth ? (
-                <input 
-                  type="text" 
-                  value={baseAsset === 0 ? '' : Number(baseAsset).toLocaleString()}
-                  onChange={(e) => {
-                    const val = e.target.value.replace(/,/g, '');
-                    if (val === '') { setBaseAsset(0); setIsDirty(true); }
-                    else if (!isNaN(Number(val))) { setBaseAsset(Number(val)); setIsDirty(true); }
-                  }}
-                  className="text-4xl md:text-6xl font-black text-slate-900 bg-transparent border-b-2 border-indigo-200 focus:border-indigo-600 outline-none w-48 md:w-64 transition-colors"
-                  placeholder="0"
-                />
-            ) : (
-                <span className="text-4xl md:text-6xl font-black text-slate-900 select-all">
-                  {calculations.totalNetAsset.toLocaleString()}
-                </span>
-            )}
+        <div className="flex items-center gap-2 md:gap-4 w-full md:w-auto">
+          <div className="flex flex-1 md:flex-none items-center bg-white border border-slate-200 rounded-lg px-3 py-1.5 text-sm overflow-hidden text-ellipsis whitespace-nowrap">
+            <span className="text-slate-400 mr-2 hidden sm:inline">money/</span>
+            <span className="font-mono font-medium text-indigo-600 truncate max-w-[120px] sm:max-w-none">{profileId}</span>
+            <button 
+              onClick={copyToClipboard}
+              className="ml-auto md:ml-3 text-slate-400 hover:text-slate-800 transition-colors"
+              title="주소 복사"
+            >
+              {copied ? <span className="text-xs text-emerald-500 font-bold mr-1">복사됨!</span> : <Copy size={16} />}
+            </button>
           </div>
-          {!isEarliestMonth && (
-            <div className="text-sm font-bold text-slate-400 mt-3 pl-1 hidden md:block">
-              기존 자산 + 이번 달 잉여 현금 {calculations.availableCashFlow > 0 ? `(+₩${calculations.availableCashFlow.toLocaleString()})` : `(₩${calculations.availableCashFlow.toLocaleString()})`}
-            </div>
-          )}
-        </div>
-        
-        <div className="relative z-10 flex gap-4 md:gap-6 border-t md:border-t-0 border-slate-100 pt-6 md:pt-0">
-          <div>
-            <p className="text-xs font-bold uppercase text-slate-400 mb-1 flex items-center gap-1.5"><CreditCard size={14} />이번 달 잉여자금</p>
-            <p className={cn("text-2xl font-black", calculations.availableCashFlow >= 0 ? "text-emerald-500" : "text-rose-500")}>
-              {calculations.availableCashFlow >= 0 ? '+' : ''}{calculations.availableCashFlow.toLocaleString()}
-            </p>
+          <div className="flex items-center gap-2">
+            {autoSaveStatus !== 'idle' && (
+              <span className="text-xs font-bold text-slate-400 mr-2 hidden md:inline">
+                {autoSaveStatus === 'saving' ? '자동 저장 중...' : '자동 저장됨'}
+              </span>
+            )}
+            <button 
+              onClick={() => handleSave(false)}
+              disabled={isSaving}
+              className={cn(
+                "px-6 py-2.5 rounded-xl font-bold text-sm shadow-md transition-colors shrink-0 flex items-center gap-2 border border-emerald-200 shadow-emerald-200/50",
+                isSaving ? "bg-emerald-50 text-emerald-600/80 cursor-not-allowed" : "bg-emerald-100 text-emerald-900 hover:bg-emerald-200"
+              )}
+            >
+              {isSaving ? '저장중...' : '저장하기'}
+            </button>
           </div>
         </div>
       </header>
 
-      {/* Main Grid View */}
-      <main>
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4 md:gap-6 auto-rows-max items-start">
+      <main className="flex-1 space-y-6">
+        {/* Dashboard Summary Bento Grid */}
+        <div className="grid grid-cols-1 md:grid-cols-12 gap-5">
+          <div className="col-span-1 md:col-span-4 lg:col-span-4 bg-indigo-900 rounded-2xl p-6 flex flex-col justify-between text-white shadow-xl shadow-indigo-100 h-full">
+            <div>
+              <div className="flex justify-between items-center mb-2">
+                <span className="text-xs font-bold uppercase tracking-wider text-indigo-300">이달의 가용 현금 흐름</span>
+                <span className="bg-white/10 text-white text-[10px] font-bold px-2 py-0.5 rounded-full">MONTHLY</span>
+              </div>
+              <div className="text-3xl xl:text-4xl font-bold mt-4 tracking-tight block truncate">
+                {calculations.availableCashFlow > 0 ? '+' : ''}₩{calculations.availableCashFlow.toLocaleString()}
+              </div>
+              <p className="text-xs text-indigo-300 mt-3 italic">* 수입 - 지출 - 저축 - 부채 상환금</p>
+            </div>
+          </div>
+
+          <div className="col-span-1 md:col-span-4 lg:col-span-4 bg-white rounded-2xl border border-slate-200 p-6 flex flex-col justify-between shadow-sm relative overflow-hidden">
+            <div>
+              {isEarliestMonth ? (
+                <>
+                  <span className="text-xs font-bold uppercase tracking-wider text-slate-400 mb-1 block">
+                    시작 자산 <span className="lowercase text-[10px] font-normal tracking-normal text-slate-400">(첫 달에만 입력)</span>
+                  </span>
+                  <div className="flex items-center gap-1 border-b-2 border-slate-100 pb-2 mb-3 mt-4 focus-within:border-indigo-300 transition-colors">
+                     <span className="text-2xl xl:text-3xl font-black text-slate-900">₩</span>
+                     <input 
+                        type="text"
+                        value={baseAsset === 0 ? '' : baseAsset.toLocaleString()}
+                        onChange={(e) => {
+                          const val = e.target.value.replace(/,/g, '');
+                          if (val === '-' || !isNaN(Number(val))) {
+                            setBaseAsset(val === '-' ? '-' as any : Number(val));
+                            setIsDirty(true);
+                          }
+                        }}
+                        placeholder="0"
+                        className="text-2xl xl:text-3xl font-black tracking-tight text-slate-900 bg-transparent outline-none w-full"
+                     />
+                  </div>
+                  <p className="text-xs text-slate-400 italic">이번 달 처음 시작할 때의 보유 자산</p>
+                </>
+              ) : (
+                <>
+                  <span className="text-xs font-bold uppercase tracking-wider text-slate-400 mb-1 block">이전 이월 자산</span>
+                  <div className="flex items-center gap-1 border-b-2 border-slate-100 pb-2 mb-3 mt-4">
+                     <span className="text-2xl xl:text-3xl font-black text-slate-400">₩</span>
+                     <span className="text-2xl xl:text-3xl font-black tracking-tight text-emerald-600 bg-transparent outline-none w-full">
+                       {carriedOverAsset.toLocaleString()}
+                     </span>
+                  </div>
+                  <p className="text-xs text-slate-400 italic">이전 달까지의 누적 자산입니다.</p>
+                </>
+              )}
+            </div>
+          </div>
+
+          <div className="col-span-1 md:col-span-4 lg:col-span-4 bg-white rounded-2xl border border-slate-200 p-6 flex flex-col justify-between shadow-sm relative overflow-hidden">
+            <div>
+              <div className="flex justify-between items-center mb-2">
+                <span className="text-xs font-bold uppercase tracking-wider text-slate-400">현재 총 자산</span>
+                <span className="bg-emerald-50 text-emerald-600 text-[10px] font-bold px-2 py-0.5 rounded-full">TOTAL</span>
+              </div>
+              <div className="text-3xl xl:text-4xl font-black tracking-tight text-emerald-600 mt-4 block truncate">
+                ₩{calculations.totalNetAsset.toLocaleString()}
+              </div>
+              <p className="text-xs text-slate-400 mt-3 italic">
+                * {isEarliestMonth ? '시작 자산 + 가용 현금' : '이전 이월 자산 + 가용 현금'}
+              </p>
+            </div>
+          </div>
+        </div>
+
+        {/* Details Grid */}
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
           <Section 
             title="수입" 
             type="INCOME"
@@ -773,10 +831,10 @@ function ItemRow({ item, type, onUpdate, onRemove }: ItemRowProps) {
                 max="31"
                 value={item.target_day || ''}
                 onChange={(e) => onUpdate(item.id, { target_day: e.target.value ? Number(e.target.value) : null })}
-                placeholder="일"
-                className="w-full bg-transparent text-center text-xs font-mono font-bold text-slate-600 outline-none appearance-none m-0"
+                placeholder="-"
+                className="w-full text-xs font-bold text-slate-600 outline-none text-right bg-transparent pr-1"
              />
-             <span className="text-[10px] text-slate-400 font-medium pointer-events-none select-none">일</span>
+             <span className="text-[10px] font-bold text-slate-400 shrink-0 select-none">일</span>
            </div>
         </div>
         <input 
