@@ -141,7 +141,7 @@ export default function Dashboard() {
         const mostRecentPastMonth = pastAllItems[0].target_month;
         const pastItemsToCarry = pastAllItems.filter(d => 
           d.target_month === mostRecentPastMonth && 
-          ((d.type === 'DEBT' && (d.balance || 0) > 0) || (d.type === 'MINUS' && (d.balance || 0) > 0) || (d.type === 'POINT' && (d.balance || 0) > 0) || d.is_pinned)
+          ((d.type === 'DEBT' && (d.balance || 0) > 0) || (d.type === 'MINUS' && (d.balance || 0) > 0) || (d.type === 'POINT' && ((d.total_amount || 0) + (d.monthly_amount || 0) - (d.balance || 0)) > 0) || d.is_pinned)
         );
         const currentItemNames = initialItems.map(i => i.name);
         
@@ -153,9 +153,9 @@ export default function Dashboard() {
                 ...item,
                 id: uuidv4(),
                 target_month: targetMonth,
-                total_amount: item.type === 'DEBT' ? (item.balance || 0) : (item.total_amount || 0), // previous remaining balance for debt, carry over limit for minus
-                monthly_amount: 0, // reset monthly amount
-                balance: item.balance || 0
+                total_amount: item.type === 'DEBT' ? (item.balance || 0) : item.type === 'POINT' ? ((item.total_amount || 0) + (item.monthly_amount || 0) - (item.balance || 0)) : (item.total_amount || 0),
+                monthly_amount: 0,
+                balance: item.type === 'POINT' ? 0 : (item.balance || 0)
               };
             } else {
               return {
@@ -775,7 +775,7 @@ export default function Dashboard() {
             accentColor="bg-fuchsia-500"
             footerBg="bg-fuchsia-50"
             footerText="text-fuchsia-700"
-            totalAmount={itemGroups.POINT.reduce((sum, item) => sum + (Number(item.balance) || 0), 0)}
+            totalAmount={itemGroups.POINT.reduce((sum, item) => sum + ((Number(item.total_amount) || 0) + (Number(item.monthly_amount) || 0) - (Number(item.balance) || 0)), 0)}
           />
         </div>
       </main>
@@ -846,7 +846,7 @@ function ItemRow({ item, type, onUpdate, onRemove }: ItemRowProps) {
         />
         {!isExpanded && (
           <div className="text-xs font-mono font-bold text-slate-600 text-right shrink-0">
-            {type === 'MINUS' ? `-₩${(item.balance || 0).toLocaleString()}` : type === 'DEBT' ? `₩${(item.monthly_amount || 0).toLocaleString()}` : `₩${(item.monthly_amount || 0).toLocaleString()}`}
+            {type === 'MINUS' ? `-₩${(item.balance || 0).toLocaleString()}` : type === 'POINT' ? `₩${((Number(item.total_amount) || 0) + (Number(item.monthly_amount) || 0) - (Number(item.balance) || 0)).toLocaleString()}` : type === 'DEBT' ? `₩${(item.monthly_amount || 0).toLocaleString()}` : `₩${(item.monthly_amount || 0).toLocaleString()}`}
           </div>
         )}
         <div className={cn("flex items-center transition-opacity", !isExpanded ? "opacity-0 group-hover/item:opacity-100" : "opacity-100")}>
@@ -868,7 +868,61 @@ function ItemRow({ item, type, onUpdate, onRemove }: ItemRowProps) {
 
       <div className={cn("grid transition-all duration-300 ease-in-out", isExpanded ? "grid-rows-[1fr] opacity-100 mt-2" : "grid-rows-[0fr] opacity-0 mt-0")}>
         <div className="overflow-hidden">
-          {type === 'MINUS' ? (
+          {type === 'POINT' ? (
+            <div className="flex gap-2">
+              <div className="flex-1 flex flex-col">
+                 <label className="text-[10px] uppercase font-bold text-slate-400 mb-1">이월/누적 금액</label>
+                 <input 
+                    type="text" 
+                    value={item.total_amount === 0 ? '' : item.total_amount?.toLocaleString() || ''}
+                    onChange={(e) => {
+                      const val = e.target.value.replace(/,/g, '');
+                      if (val === '-' || !isNaN(Number(val))) {
+                        onUpdate(item.id, { total_amount: val === '-' ? '-' as any : Number(val) });
+                      }
+                    }}
+                    placeholder="0"
+                    className="w-full bg-white border border-slate-200 rounded-lg px-2 py-1.5 text-xs font-mono font-bold text-slate-700 outline-none focus:border-indigo-400 transition-shadow"
+                  />
+              </div>
+              <div className="flex-1 flex flex-col">
+                 <label className="text-[10px] uppercase font-bold text-slate-400 mb-1">당월 추가 적립(+)</label>
+                 <input 
+                    type="text" 
+                    value={item.monthly_amount === 0 ? '' : item.monthly_amount?.toLocaleString() || ''}
+                    onChange={(e) => {
+                      const val = e.target.value.replace(/,/g, '');
+                      if (val === '-' || !isNaN(Number(val))) {
+                        onUpdate(item.id, { monthly_amount: val === '-' ? '-' as any : Number(val) });
+                      }
+                    }}
+                    placeholder="0"
+                    className="w-full bg-white border border-slate-200 rounded-lg px-2 py-1.5 text-xs font-mono font-bold text-fuchsia-600 outline-none focus:border-fuchsia-400 transition-shadow"
+                  />
+              </div>
+              <div className="flex-1 flex flex-col">
+                 <label className="text-[10px] uppercase font-bold text-slate-400 mb-1">당월 사용액</label>
+                 <input 
+                    type="text" 
+                    value={item.balance === 0 ? '' : item.balance?.toLocaleString() || ''}
+                    onChange={(e) => {
+                      const val = e.target.value.replace(/,/g, '');
+                      if (val === '-' || !isNaN(Number(val))) {
+                        onUpdate(item.id, { balance: val === '-' ? '-' as any : Number(val) });
+                      }
+                    }}
+                    placeholder="0"
+                    className="w-full bg-white border border-slate-200 rounded-lg px-2 py-1.5 text-xs font-mono font-bold text-rose-600 outline-none focus:border-rose-400 transition-shadow text-left"
+                  />
+              </div>
+              <div className="flex-[0.8] flex flex-col justify-end pb-1.5">
+                 <div className="text-right text-[10px] uppercase font-bold text-slate-400 mb-1">남은 금액</div>
+                 <div className="text-xs font-mono font-bold text-right text-fuchsia-600 mt-1.5">
+                    {((Number(item.total_amount) || 0) + (Number(item.monthly_amount) || 0) - (Number(item.balance) || 0)).toLocaleString()} 원
+                 </div>
+              </div>
+            </div>
+          ) : type === 'MINUS' ? (
             <div className="flex gap-2">
               <div className="flex-1 flex flex-col">
                  <label className="text-[10px] uppercase font-bold text-slate-400 mb-1">개설 한도</label>
@@ -904,8 +958,8 @@ function ItemRow({ item, type, onUpdate, onRemove }: ItemRowProps) {
                  </div>
               </div>
               <div className="flex-1 flex flex-col justify-end pb-1.5">
-                 <div className="text-right text-[10px] uppercase font-bold text-slate-400 mb-1">남은 한도</div>
-                 <div className="text-xs font-mono font-bold text-right text-slate-500 mt-1.5">
+                 <div className="text-right text-[10px] uppercase font-bold text-slate-400 mb-1">남은 금액</div>
+                 <div className={cn("text-xs font-mono font-bold text-right mt-1.5", type === 'POINT' ? "text-fuchsia-600" : "text-slate-500")}>
                     {item.total_amount ? (Number(item.total_amount || 0) - Number(item.balance || 0)).toLocaleString() : 0} 원
                  </div>
               </div>
@@ -976,10 +1030,10 @@ function ItemRow({ item, type, onUpdate, onRemove }: ItemRowProps) {
                     className="w-full bg-white border border-slate-200 rounded-lg px-2 py-1.5 text-sm font-mono font-bold text-slate-700 outline-none focus:border-indigo-400 transition-shadow text-left"
                   />
               </div>
-              {(type === 'SAVING' || type === 'POINT') && (
+              {type === 'SAVING' && (
                  <div className="flex-1 flex flex-col justify-end pb-1.5">
-                    <div className="text-right text-[10px] uppercase font-bold text-slate-400 mb-1">{type === 'POINT' ? '누적 총액' : '현재 잔액'}</div>
-                    <div className={cn("text-sm font-mono font-bold text-right", type === 'POINT' ? "text-fuchsia-600" : "text-indigo-600")}>
+                    <div className="text-right text-[10px] uppercase font-bold text-slate-400 mb-1">현재 잔액</div>
+                    <div className="text-sm font-mono font-bold text-right text-indigo-600">
                        <input 
                            type="text" 
                            value={item.balance === 0 ? '' : item.balance.toLocaleString()}
@@ -1068,7 +1122,7 @@ function Section({ title, type, items, onAdd, onUpdate, onRemove, accentColor, f
 
           <div className={cn("p-4 flex justify-between items-center rounded-b-2xl", footerBg)}>
             <span className={cn("text-xs font-bold uppercase", footerText)}>
-              {type === 'INCOME' ? '수입의 합계' : type === 'EXPENSE' ? '지출의 합계' : type === 'DEBT' ? '부채의 합계' : type === 'MINUS' ? '남은 한도의 합계' : type === 'POINT' ? '누적 총액의 합계' : '저축된 금액의 합계'}
+              {type === 'INCOME' ? '수입의 합계' : type === 'EXPENSE' ? '지출의 합계' : type === 'DEBT' ? '부채의 합계' : type === 'MINUS' ? '남은 한도의 합계' : type === 'POINT' ? '남은 포인트 및 지원금' : '저축된 금액의 합계'}
             </span>
             <div className="flex flex-col items-end">
               <span className={cn("text-lg font-black", footerText)}>
@@ -1081,7 +1135,7 @@ function Section({ title, type, items, onAdd, onUpdate, onRemove, accentColor, f
                 <span className="text-[10px] font-bold text-indigo-900/60 mt-1">이번 달 저축액: ₩{items.reduce((s, i) => s + (Number(i.monthly_amount) || 0), 0).toLocaleString()}</span>
               )}
               {type === 'POINT' && items.length > 0 && (
-                <span className="text-[10px] font-bold text-fuchsia-900/60 mt-1">이번 달 적립/사용액 (합계): ₩{items.reduce((s, i) => s + (Number(i.monthly_amount) || 0), 0).toLocaleString()}</span>
+                <span className="text-[10px] font-bold text-fuchsia-900/60 mt-1">사용한 금액의 합계: ₩{items.reduce((s, i) => s + (Number(i.balance) || 0), 0).toLocaleString()}</span>
               )}
               {type === 'MINUS' && items.length > 0 && (
                 <span className="text-[10px] font-bold text-slate-500/80 mt-1">총 사용 금액: ₩{items.reduce((s, i) => s + (Number(i.balance) || 0), 0).toLocaleString()}</span>
